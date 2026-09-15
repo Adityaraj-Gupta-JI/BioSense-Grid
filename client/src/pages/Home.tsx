@@ -1,31 +1,9 @@
-import { useMemo, useState } from "react";
-import {
-  Archive,
-  ArrowDownRight,
-  BookOpen,
-  ChevronRight,
-  CircleAlert,
-  Compass,
-  Download,
-  FlaskConical,
-  Gauge,
-  Menu,
-  PanelTop,
-  ScanLine,
-  Settings2,
-  Waves,
-  X,
-} from "lucide-react";
+import { useEffect, useMemo, useState } from "react";
+import { Archive, ArrowDownRight, BookOpen, Check, ChevronRight, CircleAlert, Compass, Download, FlaskConical, Gauge, Menu, PanelTop, ScanLine, Settings2, Waves, X } from "lucide-react";
+import { analyzeSignal, BioSignal, downsample, formatFrequency, formatNumber, Analysis } from "../lib/biosense";
 
 type SectionKey = "index" | "apparatus" | "archives" | "calibrations";
-
-type NavItem = {
-  key: SectionKey;
-  label: string;
-  shortLabel: string;
-  icon: typeof Compass;
-};
-
+type NavItem = { key: SectionKey; label: string; shortLabel: string; icon: typeof Compass };
 const navItems: NavItem[] = [
   { key: "index", label: "Master Index", shortLabel: "Index", icon: Compass },
   { key: "apparatus", label: "The Apparatus", shortLabel: "Apparatus", icon: PanelTop },
@@ -36,194 +14,69 @@ const navItems: NavItem[] = [
 function StatusStamp({ children, tone = "brass" }: { children: React.ReactNode; tone?: "brass" | "muted" | "error" }) {
   return <span className={`status-stamp status-stamp-${tone}`}>{children}</span>;
 }
-
 function PanelHeading({ index, eyebrow, title, detail }: { index: string; eyebrow: string; title: string; detail?: string }) {
-  return (
-    <div className="panel-heading">
-      <span className="panel-index">{index}</span>
-      <div>
-        <p className="eyebrow">{eyebrow}</p>
-        <h2>{title}</h2>
-        {detail ? <p className="panel-detail">{detail}</p> : null}
-      </div>
-    </div>
-  );
+  return <div className="panel-heading"><span className="panel-index">{index}</span><div><p className="eyebrow">{eyebrow}</p><h2>{title}</h2>{detail ? <p className="panel-detail">{detail}</p> : null}</div></div>;
 }
-
 function EmptyReadout({ label, detail }: { label: string; detail: string }) {
-  return (
-    <div className="empty-readout" role="status" aria-live="polite">
-      <Waves size={24} strokeWidth={1.4} aria-hidden="true" />
-      <strong>{label}</strong>
-      <span>{detail}</span>
-    </div>
-  );
+  return <div className="empty-readout" role="status" aria-live="polite"><Waves size={24} strokeWidth={1.4} aria-hidden="true" /><strong>{label}</strong><span>{detail}</span></div>;
+}
+function MetricRow({ label, value, suffix }: { label: string; value: string; suffix?: string }) {
+  return <div className="reading-row"><span>{label}</span><strong>{value}{suffix ? <small>{suffix}</small> : null}</strong></div>;
+}
+function WaveformPlot({ signal }: { signal: BioSignal }) {
+  const points = downsample(signal.data);
+  const min = Math.min(...points.map((point) => point.value));
+  const max = Math.max(...points.map((point) => point.value));
+  const span = max - min || 1;
+  const path = points.map((point, index) => `${index ? "L" : "M"}${(index / (points.length - 1)) * 100},${96 - ((point.value - min) / span) * 82}`).join(" ");
+  return <div className="plot-viewport real-plot" role="img" aria-label={`Real waveform for ${signal.signal_id}, ${signal.data.length} measured points`}><div className="plot-grid" aria-hidden="true" /><svg viewBox="0 0 100 100" preserveAspectRatio="none" aria-hidden="true"><path d={path} /></svg><div className="plot-legend"><span>MIN {formatNumber(min)}</span><span>MAX {formatNumber(max)}</span></div><div className="axis-label axis-y">{signal.modality.unit}</div><div className="axis-label axis-x">TIME / H →</div></div>;
+}
+function PsdPlot({ analysis }: { analysis: Analysis }) {
+  const points = analysis.psd.slice(0, 80);
+  const max = Math.max(...points.map((point) => point.power), 1e-12);
+  const path = points.map((point, index) => `${index ? "L" : "M"}${(index / Math.max(1, points.length - 1)) * 100},${96 - (point.power / max) * 82}`).join(" ");
+  return <div className="plot-viewport real-plot psd-plot" role="img" aria-label="Welch power spectral density derived from the selected real signal"><div className="plot-grid" aria-hidden="true" /><svg viewBox="0 0 100 100" preserveAspectRatio="none" aria-hidden="true"><path d={path} /></svg><div className="axis-label axis-y">POWER</div><div className="axis-label axis-x">FREQUENCY / HZ →</div></div>;
 }
 
 function Home() {
   const [activeSection, setActiveSection] = useState<SectionKey>("index");
   const [menuOpen, setMenuOpen] = useState(false);
+  const [signal, setSignal] = useState<BioSignal | null>(null);
+  const [analysis, setAnalysis] = useState<Analysis | null>(null);
+  const [loading, setLoading] = useState(false);
+  const [fault, setFault] = useState<string | null>(null);
+  const [recordOpen, setRecordOpen] = useState(false);
+  const [eventsConfigured] = useState(false);
+  const [provenance, setProvenance] = useState<string[]>([]);
 
-  const activeLabel = useMemo(
-    () => navItems.find((item) => item.key === activeSection)?.label ?? "Master Index",
-    [activeSection],
-  );
+  const activeLabel = useMemo(() => navItems.find((item) => item.key === activeSection)?.label ?? "Master Index", [activeSection]);
+  const goTo = (key: SectionKey) => { setActiveSection(key); setMenuOpen(false); document.getElementById(key)?.scrollIntoView({ behavior: "smooth", block: "start" }); };
+  const addProvenance = (entry: string) => setProvenance((current) => [...current, `${new Date().toLocaleTimeString([], { hour12: false })} ${entry}`]);
 
-  const goTo = (key: SectionKey) => {
-    setActiveSection(key);
-    setMenuOpen(false);
-    document.getElementById(key)?.scrollIntoView({ behavior: "smooth", block: "start" });
+  const openRecord = async () => {
+    setLoading(true); setFault(null);
+    try {
+      const response = await fetch("/data/biosense-demo-rf-1um.json");
+      if (!response.ok) throw new Error("Source-derived observation could not be loaded.");
+      const loaded = (await response.json()) as BioSignal;
+      setSignal(loaded); setRecordOpen(true); setAnalysis(null); addProvenance("DATASET LOADED"); addProvenance("INPUT VERIFIED");
+    } catch { setFault("Source-derived observation could not be loaded."); }
+    finally { setLoading(false); }
   };
+  const engageApparatus = () => { if (!signal) return; setLoading(true); setFault(null); goTo("apparatus"); addProvenance("SIGNAL PROFILE CREATED"); window.setTimeout(() => { setAnalysis(analyzeSignal(signal)); setLoading(false); addProvenance("PSD COMPUTED"); addProvenance("FEATURES EXTRACTED"); addProvenance("OBSERVATION COMPLETE"); }, 220); };
+  const exportJson = () => { if (!signal || !analysis) return; const payload = { signal, analysis, state: { energy: { type: "DERIVED", value: analysis.rms }, frequency: { type: "DERIVED", value: analysis.dominantFrequencyHz }, vibration: { type: "DERIVED", value: analysis.std }, geometry: { type: "UNAVAILABLE", value: null }, medium: { type: "CONTEXT", value: signal.experiment.mediator }, mass: { type: "UNAVAILABLE", value: null } }, events: { status: "EVENT DETECTION NOT CONFIGURED" }, provenance }; downloadFile(JSON.stringify(payload, null, 2), `${signal.signal_id}-analysis.json`, "application/json"); };
+  const exportCsv = () => { if (!signal || !analysis) return; const rows = [["signal_id", "mean", "median", "variance", "std", "rms", "peak_to_peak", "dominant_frequency_hz", "spectral_centroid_hz", "spectral_bandwidth_hz", "spectral_entropy", "missing", "duration_hours"], [signal.signal_id, analysis.mean, analysis.median, analysis.variance, analysis.std, analysis.rms, analysis.peakToPeak, analysis.dominantFrequencyHz, analysis.spectralCentroidHz, analysis.spectralBandwidthHz, analysis.spectralEntropy, analysis.missing, analysis.durationHours]]; downloadFile(rows.map((row) => row.join(",")).join("\n"), `${signal.signal_id}-features.csv`, "text/csv"); };
 
-  return (
-    <div className="instrument-frame">
-      <div className="instrument-grain" aria-hidden="true" />
-      <header className="site-header">
-        <div className="brand-lockup">
-          <div className="brand-mark" aria-hidden="true"><FlaskConical size={22} strokeWidth={1.2} /></div>
-          <div>
-            <p className="brand-kicker">Computational Field Register</p>
-            <p className="brand-name">BioSense <em>Grid</em></p>
-          </div>
-        </div>
-        <div className="header-register" aria-label="Current register status">
-          <span>REGISTER 01</span>
-          <span className="register-divider" aria-hidden="true" />
-          <span>OBSERVATION DECK</span>
-          <StatusStamp tone="muted">MVP / FOUNDATION</StatusStamp>
-        </div>
-        <button className="menu-toggle" aria-expanded={menuOpen} aria-controls="primary-navigation" onClick={() => setMenuOpen((open) => !open)}>
-          {menuOpen ? <X size={18} /> : <Menu size={18} />}
-          <span className="sr-only">Toggle navigation</span>
-        </button>
-      </header>
-
-      <div className="instrument-rule" aria-hidden="true"><span /><span /><span /></div>
-
-      <div className="workspace">
-        <aside id="primary-navigation" className={`navigation-rail ${menuOpen ? "navigation-rail-open" : ""}`} aria-label="Primary navigation">
-          <div className="rail-label">Navigation / 00</div>
-          <nav>
-            {navItems.map(({ key, label, shortLabel, icon: Icon }) => (
-              <button key={key} className={`nav-item ${activeSection === key ? "nav-item-active" : ""}`} onClick={() => goTo(key)} aria-current={activeSection === key ? "page" : undefined}>
-                <Icon size={17} strokeWidth={1.4} aria-hidden="true" />
-                <span className="nav-long-label">{label}</span>
-                <span className="nav-short-label">{shortLabel}</span>
-                <ChevronRight className="nav-arrow" size={14} strokeWidth={1.2} aria-hidden="true" />
-              </button>
-            ))}
-          </nav>
-          <div className="rail-footer">
-            <div className="rail-seal" aria-hidden="true">BG</div>
-            <p>EST. / SIGNAL<br />RESEARCH UNIT</p>
-          </div>
-        </aside>
-
-        <main className="main-deck">
-          <section id="index" className="master-index section-anchor" aria-labelledby="index-title">
-            <div className="index-copy">
-              <div className="section-kicker"><span className="section-number">I</span> Master Index <span className="kicker-line" /></div>
-              <h1 id="index-title">Bio-signal dynamics,<br /><em>read without invention.</em></h1>
-              <p className="lede">A reproducible computational instrument for turning experimental biological time series into transparent temporal, spectral, and signal-state readings.</p>
-              <div className="index-actions">
-                <button className="brass-button" onClick={() => goTo("apparatus")}>
-                  <ScanLine size={16} strokeWidth={1.5} /> Engage apparatus <ArrowDownRight size={15} strokeWidth={1.5} />
-                </button>
-                <button className="text-button" onClick={() => goTo("archives")}><BookOpen size={15} strokeWidth={1.5} /> Browse archives</button>
-              </div>
-            </div>
-            <div className="index-plate" aria-label="Instrument foundation status">
-              <div className="plate-caption">FIELD REGISTER / BG-001</div>
-              <div className="plate-dial">
-                <div className="dial-needle" />
-                <div className="dial-center" />
-                <span className="dial-mark dial-mark-top">READY</span>
-                <span className="dial-mark dial-mark-right">DATA</span>
-                <span className="dial-mark dial-mark-bottom">EMPTY</span>
-                <span className="dial-mark dial-mark-left">VERIFY</span>
-              </div>
-              <div className="plate-foot"><span>INPUT</span><strong>AWAITING SPECIMEN</strong></div>
-            </div>
-          </section>
-
-          <section className="metadata-ribbon" aria-label="Specimen metadata">
-            <div><span>SPECIMEN</span><strong>UNREGISTERED</strong></div>
-            <div><span>ORGANISM</span><strong>NOT SELECTED</strong></div>
-            <div><span>MODALITY</span><strong>TIME SERIES / BIOELECTRIC</strong></div>
-            <div><span>READING STATE</span><StatusStamp tone="muted">NO INPUT</StatusStamp></div>
-          </section>
-
-          <section id="apparatus" className="section-anchor apparatus-section" aria-labelledby="apparatus-title">
-            <div className="section-topline"><div className="section-kicker"><span className="section-number">II</span> The Apparatus <span className="kicker-line" /></div><StatusStamp>OSCILLOGRAPH STANDBY</StatusStamp></div>
-            <div className="apparatus-grid">
-              <article className="instrument-panel waveform-panel">
-                <PanelHeading index="01" eyebrow="Primary observation" title="Waveform viewport" detail="Measured signal trace will appear here after a verified specimen is loaded." />
-                <div className="plot-viewport" role="img" aria-label="Empty waveform viewport. No biological data loaded.">
-                  <div className="plot-grid" aria-hidden="true" />
-                  <EmptyReadout label="[ AWAITING SPECIMEN ]" detail="No signal values are rendered in the foundation state." />
-                  <div className="axis-label axis-y">AMPLITUDE</div>
-                  <div className="axis-label axis-x">TIME →</div>
-                </div>
-                <div className="panel-footer"><span>CHANNEL / —</span><span>UNIT / SOURCE-PENDING</span><span>RATE / —</span></div>
-              </article>
-
-              <article className="instrument-panel readings-panel">
-                <PanelHeading index="02" eyebrow="Statistical readings" title="Readings" detail="Derived values remain blank until source data and method parameters are present." />
-                <div className="readings-list">
-                  {[
-                    ["MEAN", "—"],
-                    ["MEDIAN", "—"],
-                    ["VARIANCE", "—"],
-                    ["SAMPLE COUNT", "—"],
-                  ].map(([label, value]) => <div className="reading-row" key={label}><span>{label}</span><strong>{value}</strong></div>)}
-                </div>
-                <div className="reading-notice"><CircleAlert size={15} strokeWidth={1.4} /><span>Observed data and derived values are intentionally separated.</span></div>
-              </article>
-            </div>
-
-            <div className="secondary-grid">
-              <article className="instrument-panel compact-panel">
-                <PanelHeading index="03" eyebrow="Spectral observation" title="Spectrum" />
-                <EmptyReadout label="[ CALCULATION DORMANT ]" detail="Welch PSD requires a loaded signal." />
-              </article>
-              <article className="instrument-panel compact-panel">
-                <PanelHeading index="04" eyebrow="Event register" title="Events" />
-                <EmptyReadout label="[ NO EVENTS REGISTERED ]" detail="No annotation is inferred without an input trace." />
-              </article>
-              <article className="instrument-panel compact-panel state-panel">
-                <PanelHeading index="05" eyebrow="Interpretation boundary" title="Bio-Signal State" />
-                <div className="state-reading"><Gauge size={22} strokeWidth={1.3} /><strong>UNASSIGNED</strong><span>Mathematical patterns are not biological mechanisms.</span></div>
-              </article>
-            </div>
-          </section>
-
-          <section className="provenance-panel instrument-panel" aria-labelledby="provenance-title">
-            <div className="provenance-heading"><PanelHeading index="06" eyebrow="Traceability" title="Chronicle of provenance" detail="Every future result must remain linked to input, method, and processing version." /><button className="icon-button" aria-label="Export is unavailable until a specimen is loaded" disabled><Download size={16} strokeWidth={1.4} /></button></div>
-            <div className="chronicle">
-              <div className="chronicle-line" aria-hidden="true" />
-              {[
-                ["01", "INPUT", "No source file registered", "Awaiting specimen"],
-                ["02", "METHOD", "Analysis parameters not yet applied", "Pending input"],
-                ["03", "OUTPUT", "Export becomes available after analysis", "Unavailable in foundation"],
-              ].map(([number, label, title, detail]) => <div className="chronicle-entry" key={number}><span className="chronicle-node">{number}</span><div><span>{label}</span><strong>{title}</strong><small>{detail}</small></div></div>)}
-            </div>
-          </section>
-
-          <section id="archives" className="placeholder-section section-anchor" aria-labelledby="archives-title">
-            <div className="section-kicker"><span className="section-number">III</span> The Archives <span className="kicker-line" /></div>
-            <div className="placeholder-copy"><Archive size={25} strokeWidth={1.2} /><div><h2 id="archives-title">Archival index awaiting dataset connection</h2><p>The archive shell is ready. Real experimental records will be added in the ingestion phase; no fabricated records are shown.</p></div><StatusStamp tone="muted">NEXT PHASE</StatusStamp></div>
-          </section>
-
-          <section id="calibrations" className="placeholder-section section-anchor" aria-labelledby="calibrations-title">
-            <div className="section-kicker"><span className="section-number">IV</span> Mechanical Calibrations <span className="kicker-line" /></div>
-            <div className="placeholder-copy"><Settings2 size={25} strokeWidth={1.2} /><div><h2 id="calibrations-title">Calibration controls not yet engaged</h2><p>Signal conditioning and method parameters will be introduced only alongside the verified data path.</p></div><StatusStamp tone="muted">NEXT PHASE</StatusStamp></div>
-          </section>
-
-          <footer className="site-footer"><span>BIOSENSE GRID / FORMAL REGISTER</span><span>ACTIVE VIEW / {activeLabel.toUpperCase()}</span><span>NO BIOLOGICAL CONCLUSION IN FOUNDATION</span></footer>
-        </main>
-      </div>
-    </div>
-  );
+  return <div className="instrument-frame"><div className="instrument-grain" aria-hidden="true" /><header className="site-header"><div className="brand-lockup"><div className="brand-mark" aria-hidden="true"><FlaskConical size={22} strokeWidth={1.2} /></div><div><p className="brand-kicker">Computational Field Register</p><p className="brand-name">BioSense <em>Grid</em></p></div></div><div className="header-register"><span>REGISTER 01</span><span className="register-divider" aria-hidden="true" /><span>OBSERVATION DECK</span><StatusStamp tone="muted">{signal ? "INPUT VERIFIED" : "MVP / FOUNDATION"}</StatusStamp></div><button className="menu-toggle" aria-expanded={menuOpen} aria-controls="primary-navigation" onClick={() => setMenuOpen((open) => !open)}>{menuOpen ? <X size={18} /> : <Menu size={18} />}<span className="sr-only">Toggle navigation</span></button></header><div className="instrument-rule" aria-hidden="true"><span /><span /><span /></div>
+    <div className="workspace"><aside id="primary-navigation" className={`navigation-rail ${menuOpen ? "navigation-rail-open" : ""}`} aria-label="Primary navigation"><div className="rail-label">Navigation / 00</div><nav>{navItems.map(({ key, label, shortLabel, icon: Icon }) => <button key={key} className={`nav-item ${activeSection === key ? "nav-item-active" : ""}`} onClick={() => goTo(key)} aria-current={activeSection === key ? "page" : undefined}><Icon size={17} strokeWidth={1.4} aria-hidden="true" /><span className="nav-long-label">{label}</span><span className="nav-short-label">{shortLabel}</span><ChevronRight className="nav-arrow" size={14} strokeWidth={1.2} aria-hidden="true" /></button>)}</nav><div className="rail-footer"><div className="rail-seal" aria-hidden="true">BG</div><p>EST. / SIGNAL<br />RESEARCH UNIT</p></div></aside>
+      <main className="main-deck"><section id="index" className="master-index section-anchor" aria-labelledby="index-title"><div className="index-copy"><div className="section-kicker"><span className="section-number">I</span> Master Index <span className="kicker-line" /></div><h1 id="index-title">Bio-signal dynamics,<br /><em>read without invention.</em></h1><p className="lede">A reproducible computational instrument for turning experimental biological time series into transparent temporal, spectral, and signal-state readings.</p><div className="index-actions"><button className="brass-button" onClick={() => goTo("archives")}><BookOpen size={16} strokeWidth={1.5} /> Browse archives <ArrowDownRight size={15} strokeWidth={1.5} /></button><button className="text-button" onClick={() => goTo("apparatus")}><ScanLine size={15} strokeWidth={1.5} /> View apparatus</button></div></div><div className="index-plate" aria-label="Instrument status"><div className="plate-caption">FIELD REGISTER / BG-001</div><div className="plate-dial"><div className={`dial-needle ${signal ? "dial-needle-engaged" : ""}`} /><div className="dial-center" /><span className="dial-mark dial-mark-top">READY</span><span className="dial-mark dial-mark-right">DATA</span><span className="dial-mark dial-mark-bottom">{signal ? "LIVE" : "EMPTY"}</span><span className="dial-mark dial-mark-left">VERIFY</span></div><div className="plate-foot"><span>INPUT</span><strong>{loading ? "CALCULATING..." : signal ? "SPECIMEN REGISTERED" : "AWAITING SPECIMEN"}</strong></div></div></section>
+      <section className="metadata-ribbon" aria-label="Specimen metadata"><div><span>SPECIMEN</span><strong>{signal ? signal.signal_id : "UNREGISTERED"}</strong></div><div><span>ORGANISM</span><strong>{signal?.organism.name ?? "NOT SELECTED"}</strong></div><div><span>MODALITY</span><strong>{signal ? `${signal.modality.domain.toUpperCase()} / ${signal.modality.measurement.toUpperCase()}` : "TIME SERIES / BIOELECTRIC"}</strong></div><div><span>READING STATE</span><StatusStamp tone={signal ? "brass" : "muted"}>{loading ? "CALCULATING..." : signal ? analysis ? "ANALYSIS COMPLETE" : "OSCILLOGRAPH ENGAGED" : "NO INPUT"}</StatusStamp></div></section>
+      <section id="archives" className="archive-section section-anchor" aria-labelledby="archives-title"><div className="section-topline"><div className="section-kicker"><span className="section-number">II</span> The Archives <span className="kicker-line" /></div><StatusStamp tone="muted">CURATED REAL SUBSET</StatusStamp></div><div className="archive-record instrument-panel"><div className="record-header"><div><p className="eyebrow">Archive record / BS-DS-001</p><h2 id="archives-title">Microbial electrochemical time profiles</h2><p className="panel-detail">A compact source-derived observation from the public Zenodo record. This is not the complete 576-profile collection.</p></div><Archive size={28} strokeWidth={1.1} aria-hidden="true" /></div><div className="record-grid"><div><span>ORGANISM</span><strong>Shewanella oneidensis MR-1</strong></div><div><span>OBSERVATION</span><strong>+200 mV / 1 uM / RF</strong></div><div><span>MEASURED POINTS</span><strong>994 / 16.55 h</strong></div><div><span>TIME FIELD</span><strong>Time/hr</strong></div><div><span>UNIT</span><strong>UNAVAILABLE IN SOURCE</strong></div><div><span>LICENSE</span><strong>CC BY 4.0</strong></div></div><div className="record-source"><span>ZENODO / DOI 10.5281/zenodo.7050972</span><a href="https://doi.org/10.5281/zenodo.7050972" target="_blank" rel="noreferrer">OPEN SOURCE RECORD ↗</a></div><div className="record-actions"><button className="brass-button" onClick={openRecord} disabled={loading}>{recordOpen ? <Check size={15} /> : <Archive size={15} />} {loading ? "CALCULATING..." : recordOpen ? "SPECIMEN REGISTERED" : "OPEN RECORD"}</button>{recordOpen ? <button className="text-button" onClick={engageApparatus}><ScanLine size={15} /> Engage apparatus</button> : null}</div></div></section>
+      <section id="apparatus" className="section-anchor apparatus-section" aria-labelledby="apparatus-title"><div className="section-topline"><div className="section-kicker"><span className="section-number">III</span> The Apparatus <span className="kicker-line" /></div><StatusStamp tone={analysis ? "brass" : "muted"}>{loading ? "CALCULATING..." : analysis ? "ANALYSIS COMPLETE" : signal ? "INPUT VERIFIED" : "OSCILLOGRAPH STANDBY"}</StatusStamp></div>{fault ? <div className="fault-banner" role="alert"><CircleAlert size={16} /> [ MECHANICAL FAULT DETECTED ] {fault}</div> : null}<div className="apparatus-grid"><article className="instrument-panel waveform-panel"><PanelHeading index="01" eyebrow="Primary observation" title="Waveform viewport" detail={signal ? "Display representation of the selected real source-derived signal." : "Measured signal trace will appear here after a verified specimen is loaded."} />{signal ? <WaveformPlot signal={signal} /> : <div className="plot-viewport" role="img" aria-label="Empty waveform viewport. No biological data loaded."><div className="plot-grid" aria-hidden="true" /><EmptyReadout label="[ AWAITING SPECIMEN ]" detail="No signal values are rendered until a source record is opened." /><div className="axis-label axis-y">{"UNIT"}</div><div className="axis-label axis-x">TIME →</div></div>}<div className="panel-footer"><span>CHANNEL / {signal?.experiment.mediator ?? "—"}</span><span>UNIT / {signal ? signal.modality.unit : "SOURCE-PENDING"}</span><span>RATE / {analysis ? formatNumber(analysis.rateHz, 5) : "—"} HZ</span></div></article><article className="instrument-panel readings-panel"><PanelHeading index="02" eyebrow="Statistical readings" title="Readings" detail="Derived values are computed from the selected source signal." />{analysis ? <div className="readings-list"><MetricRow label="RMS" value={formatNumber(analysis.rms)} /><MetricRow label="STD" value={formatNumber(analysis.std)} /><MetricRow label="VARIANCE" value={formatNumber(analysis.variance)} /><MetricRow label="PEAK-TO-PEAK" value={formatNumber(analysis.peakToPeak)} /><MetricRow label="MIN / MAX" value={`${formatNumber(analysis.min)} / ${formatNumber(analysis.max)}`} /></div> : <div className="readings-list"><MetricRow label="RMS" value="—" /><MetricRow label="STD" value="—" /><MetricRow label="VARIANCE" value="—" /><MetricRow label="PEAK-TO-PEAK" value="—" /></div>}<div className="reading-notice"><CircleAlert size={15} strokeWidth={1.4} /><span>{analysis ? "DERIVED / calculated from raw source-derived values." : "Observed data and derived values are intentionally separated."}</span></div></article></div>
+        <div className="secondary-grid"><article className="instrument-panel compact-panel"><PanelHeading index="03" eyebrow="Spectral observation" title="Welch PSD" />{analysis ? <><PsdPlot analysis={analysis} /><div className="spectral-metrics"><MetricRow label="DOMINANT" value={formatFrequency(analysis.dominantFrequencyHz)} /><MetricRow label="CENTROID" value={formatFrequency(analysis.spectralCentroidHz)} /><MetricRow label="BANDWIDTH" value={formatFrequency(analysis.spectralBandwidthHz)} /><MetricRow label="ENTROPY" value={formatNumber(analysis.spectralEntropy, 4)} /></div></> : <EmptyReadout label="[ CALCULATION DORMANT ]" detail="Welch PSD requires a loaded signal." />}</article><article className="instrument-panel compact-panel"><PanelHeading index="04" eyebrow="Event register" title="Events" />{eventsConfigured ? <div /> : <EmptyReadout label="[ EVENT DETECTION NOT CONFIGURED ]" detail="No biological event labels are inferred in this MVP." />}</article><article className="instrument-panel compact-panel state-panel"><PanelHeading index="05" eyebrow="Interpretation boundary" title="Bio-Signal State" />{analysis ? <div className="state-reading"><Gauge size={22} strokeWidth={1.3} /><strong>DERIVED READINGS</strong><div className="state-table"><span>ENERGY <b>DERIVED</b></span><strong>RMS {formatNumber(analysis.rms)}</strong><span>FREQUENCY <b>DERIVED</b></span><strong>{formatFrequency(analysis.dominantFrequencyHz)}</strong><span>VIBRATION <b>DERIVED</b></span><strong>STD {formatNumber(analysis.std)}</strong><span>GEOMETRY <b>UNAVAILABLE</b></span><strong>NO SPATIAL MEASUREMENT</strong><span>MEDIUM <b>CONTEXT</b></span><strong>{signal?.experiment.mediator}</strong><span>MASS <b>UNAVAILABLE</b></span><strong>NO MASS MEASUREMENT</strong></div><small>Derived mathematics are not biological mechanisms or organism fingerprints.</small></div> : <div className="state-reading"><Gauge size={22} strokeWidth={1.3} /><strong>UNASSIGNED</strong><span>Load and analyze a real observation to populate measured, derived, context, and unavailable dimensions.</span></div>}</article></div></section>
+      <section className="provenance-panel instrument-panel" aria-labelledby="provenance-title"><div className="provenance-heading"><PanelHeading index="06" eyebrow="Traceability" title="Chronicle of provenance" detail="Application timestamps and source processing steps for the current observation." /><div className="export-actions"><button className="icon-button" aria-label="Export JSON" onClick={exportJson} disabled={!analysis}><Download size={16} /></button><button className="icon-button" aria-label="Export CSV" onClick={exportCsv} disabled={!analysis}>CSV</button></div></div><div className="chronicle">{provenance.length ? provenance.map((entry, index) => <div className="chronicle-entry" key={`${entry}-${index}`}><span className="chronicle-node">{String(index + 1).padStart(2, "0")}</span><div><span>{entry.split(" ").slice(1).join(" ")}</span><strong>{entry.split(" ")[0]}</strong><small>processing version / {signal?.provenance.processing_version}</small></div></div>) : <div className="chronicle-empty"><span>[ AWAITING SPECIMEN ]</span><small>Open a real archive record to begin the provenance chronicle.</small></div>}</div></section>
+      <section id="calibrations" className="placeholder-section section-anchor" aria-labelledby="calibrations-title"><div className="section-kicker"><span className="section-number">IV</span> Mechanical Calibrations <span className="kicker-line" /></div><div className="placeholder-copy"><Settings2 size={25} strokeWidth={1.2} /><div><h2 id="calibrations-title">Source-defined analysis parameters</h2><p>Welch PSD uses a Hann window, 50% overlap, and the largest power-of-two segment supported by the selected signal. Advanced conditioning controls remain unavailable in this MVP.</p></div><StatusStamp tone="muted">METHOD LOCKED</StatusStamp></div></section>
+      <footer className="site-footer"><span>BIOSENSE GRID / FORMAL REGISTER</span><span>ACTIVE VIEW / {activeLabel.toUpperCase()}</span><span>{signal ? "SOURCE-DERIVED OBSERVATION" : "NO BIOLOGICAL CONCLUSION IN FOUNDATION"}</span></footer></main></div></div>;
 }
-
+function downloadFile(content: string, filename: string, type: string) { const link = document.createElement("a"); link.href = URL.createObjectURL(new Blob([content], { type })); link.download = filename; link.click(); URL.revokeObjectURL(link.href); }
 export default Home;

@@ -139,3 +139,44 @@ button:disabled { cursor: not-allowed; opacity: .55; }
   --color-border: var(--line);
   --color-ring: var(--brass);
 }
+
+/* Real-data MVP extensions */
+.archive-section { margin-top: 16px; }
+.archive-record { padding: 24px; }
+.record-header { display: flex; justify-content: space-between; gap: 20px; }
+.record-header > svg { flex: none; color: var(--brass-dark); }
+.record-header h2 { margin: 0; font: 21px var(--display); font-weight: 500; }
+.record-grid { display: grid; grid-template-columns: repeat(3, 1fr); gap: 0; margin-top: 24px; border-top: 1px solid var(--line); border-left: 1px solid var(--line); }
+.record-grid > div { min-height: 70px; display: flex; flex-direction: column; gap: 7px; padding: 14px; border-right: 1px solid var(--line); border-bottom: 1px solid var(--line); }
+.record-grid span, .record-source { color: var(--ink-faded); font: 9px var(--data); letter-spacing: .1em; text-transform: uppercase; }
+.record-grid strong { font: 12px var(--data); font-weight: 400; }
+.record-source { display: flex; justify-content: space-between; gap: 12px; margin-top: 19px; padding-top: 13px; border-top: 1px solid var(--line); }
+.record-source a { color: var(--brass-dark); text-decoration: none; border-bottom: 1px solid var(--brass); }
+.record-actions { display: flex; align-items: center; gap: 20px; margin-top: 22px; }
+.fault-banner { display: flex; align-items: center; gap: 9px; margin: 0 0 16px; padding: 11px 13px; border: 1px solid var(--error); color: var(--error); font: 11px var(--data); }
+.real-plot svg { position: absolute; inset: 18px 10px 20px 13px; width: calc(100% - 23px); height: calc(100% - 38px); overflow: visible; }
+.real-plot svg path { fill: none; stroke: var(--brass-dark); stroke-width: .9; vector-effect: non-scaling-stroke; }
+.real-plot .plot-legend { position: absolute; top: 7px; right: 10px; left: 14px; display: flex; justify-content: space-between; color: var(--ink-faded); font: 8px var(--data); letter-spacing: .04em; }
+.dial-needle-engaged { background: #385234; transform: rotate(62deg); }
+.spectral-metrics { margin-top: 10px; border-top: 1px solid var(--line); }
+.spectral-metrics .reading-row { padding: 9px 2px; }
+.spectral-metrics .reading-row strong { font-size: 13px; }
+.reading-row small { margin-left: 5px; color: var(--ink-faded); font-size: 9px; }
+.state-table { width: 100%; display: grid; grid-template-columns: 1fr auto; gap: 7px 10px; margin-top: 4px; }
+.state-table span { color: var(--ink-faded); font: 9px var(--data); letter-spacing: .04em; }
+.state-table span b { margin-left: 3px; color: var(--brass-dark); font-size: 8px; font-weight: 400; }
+.state-table strong { font: 10px var(--data); font-weight: 400; text-align: right; }
+.state-reading small { color: var(--ink-faded); font: 11px/1.45 var(--reading); }
+.export-actions { display: flex; gap: 6px; }
+.export-actions .icon-button:last-child { width: 45px; font-size: 9px; }
+.chronicle { grid-template-columns: repeat(3, 1fr); }
+.chronicle-empty { display: flex; flex-direction: column; gap: 7px; padding: 11px 0 2px; color: var(--ink-faded); font: 11px var(--data); }
+.chronicle-empty small { font: 12px var(--reading); }
+@media (max-width: 760px) {
+  .record-grid { grid-template-columns: 1fr 1fr; }
+  .record-source { flex-direction: column; }
+  .record-actions { align-items: flex-start; flex-direction: column; gap: 10px; }
+  .chronicle { grid-template-columns: 1fr; }
+  .state-table { grid-template-columns: 1fr; gap: 4px; }
+  .state-table strong { text-align: left; margin-bottom: 4px; }
+}
