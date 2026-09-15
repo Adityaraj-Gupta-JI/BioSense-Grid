@@ -33,6 +33,17 @@ export type BioSignal = {
     extraction: string;
     processing_version: string;
   };
+  uploadMetadata?: {
+    uploadId: string;
+    originalFilename: string;
+    importedAt: string;
+    source: 'USER_UPLOAD';
+    timeColumn: string;
+    signalColumn: string;
+    unit: string;
+    rowCount: number;
+    validationStatus: 'READY';
+  };
   data: DataPoint[];
 };
 
@@ -77,6 +88,7 @@ export type InputInspection = {
   missingValues: number;
   nonFiniteValues: number;
   duplicateTimes: number;
+  timeOrderValid: boolean;
   irregularSampling: boolean;
   flatline: boolean;
   baselineStability: number;
@@ -191,6 +203,7 @@ export function inspectSignal(signal: BioSignal): InputInspection {
   const validTimes = times.filter(finite);
   const validValues = values.filter(finite);
   const deltas = validTimes.slice(1).map((time, index) => time - validTimes[index]).filter(finite);
+  const timeOrderValid = validTimes.length > 1 && validTimes.every((time, index) => index === 0 || time > validTimes[index - 1]);
   const intervalHours = deltas.length ? average(deltas) : Number.NaN;
   const irregularSampling = !deltas.length || deltas.some((delta) => Math.abs(delta - intervalHours) > Math.max(1e-8, intervalHours * 0.01));
   const mean = validValues.length ? average(validValues) : Number.NaN;
@@ -208,10 +221,11 @@ export function inspectSignal(signal: BioSignal): InputInspection {
     missingValues: values.length - validValues.length,
     nonFiniteValues,
     duplicateTimes,
+    timeOrderValid,
     irregularSampling,
     flatline: validValues.length > 0 && validValues.every((value) => value === validValues[0]),
     baselineStability,
-    status: validTimes.length > 1 && validValues.length > 1 && nonFiniteValues === 0 && duplicateTimes === 0 && !irregularSampling ? 'READY' : 'FAULT',
+    status: validTimes.length > 1 && validValues.length > 1 && nonFiniteValues === 0 && duplicateTimes === 0 && timeOrderValid && !irregularSampling ? 'READY' : 'FAULT',
   };
 }
 
@@ -316,33 +330,67 @@ export function formatFrequency(value: number) {
   return `${value.toFixed(4)} Hz`;
 }
 
-export type CsvInspection = InputInspection & { columns: string[]; selectedTime: string; selectedSignal: string; unit: string };
+export const CSV_MAX_BYTES = 10_000_000;
+export const CSV_MIN_ROWS = 4;
+export type CsvInspection = InputInspection & { fileName: string; rowCount: number; columnCount: number; columns: string[]; selectedTime: string; selectedSignal: string; unit: string; mappingStatus: 'READY' | 'REVIEW' | 'REJECTED'; timeCandidates: string[]; signalCandidates: string[]; message?: string };
+export type CsvStructure = { fileName: string; columns: string[]; rows: string[][]; timeCandidates: string[]; signalCandidates: string[]; suggestedTime?: string; suggestedSignal?: string; error?: string };
+
+function csvRows(text: string): { rows: string[][]; error?: string } {
+  const rows: string[][] = []; let row: string[] = []; let cell = ''; let quoted = false;
+  for (let index = 0; index < text.length; index += 1) {
+    const character = text[index];
+    if (character === '"') { if (quoted && text[index + 1] === '"') { cell += '"'; index += 1; } else quoted = !quoted; }
+    else if (character === ',' && !quoted) { row.push(cell.trim()); cell = ''; }
+    else if ((character === '\n' || character === '\r') && !quoted) { if (character === '\r' && text[index + 1] === '\n') index += 1; row.push(cell.trim()); if (row.some((value) => value !== '')) rows.push(row); row = []; cell = ''; }
+    else cell += character;
+  }
+  if (quoted) return { rows, error: '[ INPUT SCHEMA FAULT ] CSV contains an unterminated quoted field.' };
+  if (cell !== '' || row.length) { row.push(cell.trim()); if (row.some((value) => value !== '')) rows.push(row); }
+  return { rows };
+}
+
+const numericRatio = (values: string[]) => values.length ? values.filter((value) => value.trim() !== '' && Number.isFinite(Number(value))).length / values.length : 0;
+const likelyTime = (name: string) => /^(time|timestamp|datetime|date|seconds?|hours?|time[_ -]?s)$/i.test(name.trim()) || /time|timestamp|datetime/i.test(name);
+const likelySignal = (name: string) => /signal|value|current|voltage|amplitude|measurement|data/i.test(name);
+
+export function inspectCsvStructure(text: string, filename: string): CsvStructure {
+  if (!filename.toLowerCase().endsWith('.csv')) return { fileName: filename, columns: [], rows: [], timeCandidates: [], signalCandidates: [], error: '[ INPUT SCHEMA FAULT ] Only .csv files are accepted.' };
+  if (!text.trim()) return { fileName: filename, columns: [], rows: [], timeCandidates: [], signalCandidates: [], error: '[ INPUT SCHEMA FAULT ] CSV file is empty.' };
+  if (new TextEncoder().encode(text).byteLength > CSV_MAX_BYTES) return { fileName: filename, columns: [], rows: [], timeCandidates: [], signalCandidates: [], error: `[ INPUT RECORD TOO LARGE ] CSV exceeds the configured ${CSV_MAX_BYTES / 1_000_000} MB limit.` };
+  const parsed = csvRows(text);
+  if (parsed.error) return { fileName: filename, columns: [], rows: [], timeCandidates: [], signalCandidates: [], error: parsed.error };
+  const [header = [], ...rows] = parsed.rows;
+  const columns = header.map((column) => column.trim());
+  if (columns.length < 2 || columns.some((column) => !column)) return { fileName: filename, columns, rows, timeCandidates: [], signalCandidates: [], error: '[ INPUT SCHEMA FAULT ] CSV requires at least two non-empty columns.' };
+  if (new Set(columns.map((column) => column.toLowerCase())).size !== columns.length) return { fileName: filename, columns, rows, timeCandidates: [], signalCandidates: [], error: '[ INPUT SCHEMA FAULT ] CSV column names must be unique.' };
+  if (rows.some((row) => row.length !== columns.length)) return { fileName: filename, columns, rows, timeCandidates: [], signalCandidates: [], error: '[ INPUT SCHEMA FAULT ] CSV rows do not have a consistent column count.' };
+  if (rows.length < CSV_MIN_ROWS) return { fileName: filename, columns, rows, timeCandidates: [], signalCandidates: [], error: `[ INPUT SCHEMA FAULT ] CSV requires at least ${CSV_MIN_ROWS} data rows.` };
+  const scored = columns.map((column, index) => { const values = rows.map((row) => row[index] ?? ''); const ratio = numericRatio(values); const numbers = values.map(Number).filter(Number.isFinite); const monotonic = numbers.length > 1 && numbers.every((value, cursor) => cursor === 0 || value > numbers[cursor - 1]); return { column, index, ratio, monotonic, timeScore: ratio * 4 + (monotonic ? 3 : 0) + (likelyTime(column) ? 4 : 0), signalScore: ratio * 3 + (likelySignal(column) ? 4 : 0) }; });
+  const timeScored = scored.filter((item) => item.ratio === 1 && (item.monotonic || likelyTime(item.column))).sort((a, b) => b.timeScore - a.timeScore);
+  const timeCandidates = timeScored.map((item) => item.column);
+  const suggestedTime = timeScored[0] && timeScored[0].timeScore > (timeScored[1]?.timeScore ?? -Infinity) ? timeScored[0].column : undefined;
+  const signalScored = scored.filter((item) => item.ratio === 1 && item.column !== suggestedTime).sort((a, b) => b.signalScore - a.signalScore);
+  const signalCandidates = signalScored.map((item) => item.column);
+  const suggestedSignal = signalScored[0] && signalScored[0].signalScore > (signalScored[1]?.signalScore ?? -Infinity) ? signalScored[0].column : undefined;
+  return { fileName: filename, columns, rows, timeCandidates, signalCandidates, suggestedTime, suggestedSignal };
+}
 
 export function parseCsvObservation(text: string, filename: string, timeColumn?: string, signalColumn?: string, unit = 'UNAVAILABLE'): { signal?: BioSignal; inspection?: CsvInspection; error?: string } {
-  if (!text.trim()) return { error: '[ INPUT SCHEMA FAULT ] CSV file is empty.' };
-  if (text.length > 2_000_000) return { error: '[ INPUT SCHEMA FAULT ] CSV exceeds the 2 MB MVP limit.' };
-  const lines = text.trim().split(/\r?\n/).filter(Boolean);
-  const columns = lines[0].split(',').map((column) => column.trim());
-  if (columns.length < 2) return { error: '[ INPUT SCHEMA FAULT ] CSV requires at least two columns.' };
-  const rows = lines.slice(1).map((line) => line.split(',').map((cell) => cell.trim()));
-  const probableTime = timeColumn ?? columns.find((column) => /time|date|timestamp|hour/i.test(column)) ?? columns[0];
-  const probableSignal = signalColumn ?? columns.find((column) => column !== probableTime && /signal|value|current|measurement|data/i.test(column)) ?? columns.find((column) => column !== probableTime) ?? '';
-  if (!probableTime || !probableSignal) return { error: '[ INPUT SCHEMA FAULT ] Time and signal columns are required.' };
-  const timeIndex = columns.indexOf(probableTime);
-  const signalIndex = columns.indexOf(probableSignal);
-  if (timeIndex < 0 || signalIndex < 0 || timeIndex === signalIndex) return { error: '[ INPUT SCHEMA FAULT ] Selected columns are not available.' };
-  const data = rows.map((row) => ({ time_h: Number(row[timeIndex]), value: Number(row[signalIndex]) }));
-  const signal: BioSignal = {
-    signal_id: `CSV-${filename.replace(/[^a-z0-9]+/gi, '-').replace(/^-|-$/g, '').toUpperCase()}`,
-    organism: { name: 'UNAVAILABLE' }, modality: { domain: 'user-upload', measurement: 'user-provided signal', unit },
-    experiment: { poised_potential_mv: Number.NaN, mediator: 'UNAVAILABLE', mediator_concentration_um: Number.NaN, condition_source: 'USER CSV' },
-    sampling: { time_column: probableTime, time_unit: 'UNAVAILABLE', interval_hours: Number.NaN, rate_hz: Number.NaN, duration_hours: Number.NaN },
-    source: { type: 'user_upload', publisher: 'BioSense Grid', doi: 'UNAVAILABLE', title: filename, license: 'UNAVAILABLE', archive_file: filename, workbook: 'UNAVAILABLE', sheet: 'UNAVAILABLE', retrieved_utc: new Date().toISOString() },
-    provenance: { raw_archive_sha256: 'UNAVAILABLE', extraction: `CSV import; time=${probableTime}; signal=${probableSignal}`, processing_version: 'biosense-grid-foundation-data-v1' }, data,
-  };
-  const inspection = inspectSignal(signal);
-  if (data.length < 4) return { error: '[ INPUT SCHEMA FAULT ] CSV requires at least four data rows.', inspection: { ...inspection, columns, selectedTime: probableTime, selectedSignal: probableSignal, unit } };
-  return { signal, inspection: { ...inspection, columns, selectedTime: probableTime, selectedSignal: probableSignal, unit } };
+  const structure = inspectCsvStructure(text, filename);
+  if (structure.error) return { error: structure.error };
+  const probableTime = timeColumn ?? structure.suggestedTime;
+  const probableSignal = signalColumn ?? structure.suggestedSignal;
+  const base = { fileName: filename, rowCount: structure.rows.length, columnCount: structure.columns.length, columns: structure.columns, selectedTime: probableTime ?? '', selectedSignal: probableSignal ?? '', unit, timeCandidates: structure.timeCandidates, signalCandidates: structure.signalCandidates };
+  if (!probableTime || !probableSignal || probableTime === probableSignal) return { error: '[ REVIEW COLUMN MAPPING ] Select one valid time column and one valid signal column.', inspection: { ...inspectSignal({ data: [], signal_id: 'CSV-PENDING', organism: { name: 'UNAVAILABLE' }, modality: { domain: 'user-upload', measurement: 'user-provided signal', unit }, experiment: { poised_potential_mv: Number.NaN, mediator: 'UNAVAILABLE', mediator_concentration_um: Number.NaN, condition_source: 'USER CSV' }, sampling: { time_column: '', time_unit: 'UNAVAILABLE', interval_hours: Number.NaN, rate_hz: Number.NaN, duration_hours: Number.NaN }, source: { type: 'user_upload', publisher: 'BioSense Grid', doi: 'UNAVAILABLE', title: filename, license: 'UNAVAILABLE', archive_file: filename, workbook: 'UNAVAILABLE', sheet: 'UNAVAILABLE', retrieved_utc: new Date().toISOString() }, provenance: { raw_archive_sha256: 'UNAVAILABLE', extraction: 'CSV structure inspected', processing_version: 'biosense-grid-h51' } }), ...base, mappingStatus: 'REVIEW', message: 'Time and signal columns must be selected.' } };
+  const timeIndex = structure.columns.indexOf(probableTime); const signalIndex = structure.columns.indexOf(probableSignal);
+  if (timeIndex < 0 || signalIndex < 0 || timeIndex === signalIndex) return { error: '[ REVIEW COLUMN MAPPING ] Selected columns are not available.', inspection: { ...base, timeDetected: false, signalDetected: false, sampleCount: structure.rows.length, durationHours: Number.NaN, intervalHours: Number.NaN, rateHz: Number.NaN, missingValues: 0, nonFiniteValues: 0, duplicateTimes: 0, timeOrderValid: false, irregularSampling: true, flatline: false, baselineStability: Number.NaN, status: 'FAULT', mappingStatus: 'REVIEW', message: 'Selected columns are not available.' } };
+  const data = structure.rows.map((row) => ({ time_h: row[timeIndex].trim() === '' ? Number.NaN : Number(row[timeIndex]), value: row[signalIndex].trim() === '' ? Number.NaN : Number(row[signalIndex]) }));
+  const uploadId = `CSV-${filename.replace(/[^a-z0-9]+/gi, '-').replace(/^-|-$/g, '').toUpperCase()}`;
+  const importedAt = new Date().toISOString();
+  const signal: BioSignal = { signal_id: uploadId, organism: { name: 'UNAVAILABLE' }, modality: { domain: 'user-upload', measurement: 'user-provided signal', unit }, experiment: { poised_potential_mv: Number.NaN, mediator: 'UNAVAILABLE', mediator_concentration_um: Number.NaN, condition_source: 'USER CSV' }, sampling: { time_column: probableTime, time_unit: 'UNAVAILABLE', interval_hours: Number.NaN, rate_hz: Number.NaN, duration_hours: Number.NaN }, source: { type: 'user_upload', publisher: 'BioSense Grid', doi: 'UNAVAILABLE', title: filename, license: 'UNAVAILABLE', archive_file: filename, workbook: 'UNAVAILABLE', sheet: 'UNAVAILABLE', retrieved_utc: importedAt }, provenance: { raw_archive_sha256: 'UNAVAILABLE', extraction: `CSV import; time=${probableTime}; signal=${probableSignal}`, processing_version: 'biosense-grid-h51' }, uploadMetadata: { uploadId, originalFilename: filename, importedAt, source: 'USER_UPLOAD', timeColumn: probableTime, signalColumn: probableSignal, unit, rowCount: data.length, validationStatus: 'READY' }, data };
+  const inspected = inspectSignal(signal); const inspection: CsvInspection = { ...inspected, ...base, mappingStatus: inspected.status === 'READY' ? 'READY' : 'REJECTED', message: inspected.status === 'READY' ? undefined : 'Selected columns contain invalid, duplicate, non-monotonic, or irregular data.' };
+  if (inspected.status !== 'READY') return { error: `[ SIGNAL INPUT INVALID ] ${inspection.message}`, inspection };
+  return { signal, inspection };
 }
 
 export function compareCompatible(a: BioSignal, b: BioSignal) {

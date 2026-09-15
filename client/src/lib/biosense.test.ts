@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { analyzeSignal, BioSignal, compareCompatible, detectSignalEvents, eventRegisterCsv, inspectSignal, parseCsvObservation } from './biosense';
+import { analyzeSignal, BioSignal, compareCompatible, CSV_MAX_BYTES, detectSignalEvents, eventRegisterCsv, inspectCsvStructure, inspectSignal, parseCsvObservation } from './biosense';
 
 function fixture(values: number[]): BioSignal {
   return {
@@ -111,5 +111,39 @@ describe('BioSense deterministic analysis', () => {
     expect(first.events).toEqual(second.events);
     expect(first.events.every((event) => event.source_signal === realSignal.signal_id && event.end_time_h >= event.start_time_h)).toBe(true);
     expect(eventRegisterCsv(realSignal, first).split('\n')).toHaveLength(first.events.length + 1);
+  });
+
+  it('rejects oversized, malformed, non-CSV, and inconsistent files deterministically', () => {
+    expect(inspectCsvStructure('time,value\n0,1\n', 'record.txt').error).toContain('.csv');
+    expect(inspectCsvStructure('time,value\n"0,1\n', 'record.csv').error).toContain('unterminated');
+    expect(inspectCsvStructure('time,value\n0,1\n1\n2,3\n3,4\n', 'record.csv').error).toContain('consistent');
+    expect(inspectCsvStructure('time,value\n' + '0,1\n'.repeat(3_000_000), 'record.csv').error).toContain('10 MB');
+    expect(CSV_MAX_BYTES).toBe(10_000_000);
+  });
+
+  it('requires explicit mapping when column heuristics are ambiguous', () => {
+    const structure = inspectCsvStructure('a,b,c\n0,1,2\n1,2,3\n2,3,4\n3,4,5\n', 'ambiguous.csv');
+    expect(structure.suggestedTime).toBeUndefined();
+    expect(structure.suggestedSignal).toBeUndefined();
+    const mapped = parseCsvObservation('a,b,c\n0,1,2\n1,2,3\n2,3,4\n3,4,5\n', 'ambiguous.csv', 'a', 'c', 'mV');
+    expect(mapped.signal?.uploadMetadata?.timeColumn).toBe('a');
+    expect(mapped.signal?.modality.unit).toBe('mV');
+  });
+
+  it('rejects invalid numeric, non-monotonic, irregular, and insufficient inputs', () => {
+    expect(parseCsvObservation('time,value\n0,1\n1,NaN\n2,3\n3,4\n', 'nan.csv').inspection?.status).toBe('FAULT');
+    expect(parseCsvObservation('time,value\n0,1\n2,2\n1,3\n3,4\n', 'order.csv').inspection?.timeOrderValid).toBe(false);
+    expect(parseCsvObservation('time,value\n0,1\n1,2\n3,3\n4,4\n', 'irregular.csv').inspection?.irregularSampling).toBe(true);
+    expect(parseCsvObservation('time,value\n0,1\n1,2\n2,3\n', 'short.csv').error).toContain('at least');
+  });
+
+  it('converges a valid upload through the same analysis and export pipeline', () => {
+    const parsed = parseCsvObservation('seconds,current\n0,1\n1,2\n2,1\n3,3\n4,2\n5,4\n', 'run.csv', 'seconds', 'current', 'uA');
+    expect(parsed.signal?.source.type).toBe('user_upload');
+    expect(parsed.inspection?.status).toBe('READY');
+    const analysis = analyzeSignal(parsed.signal!);
+    expect(analysis.sampleCount).toBe(6);
+    expect(Number.isFinite(analysis.rms)).toBe(true);
+    expect(parsed.signal?.uploadMetadata?.source).toBe('USER_UPLOAD');
   });
 });

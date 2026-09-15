@@ -251,3 +251,12 @@ button:disabled { cursor: not-allowed; opacity: .55; }
 .event-export-button:hover:not(:disabled) { background: var(--brass); color: var(--paper); }
 .event-export-button:disabled { opacity: .45; cursor: not-allowed; }
 @media (max-width: 760px) { .event-summary { grid-template-columns: repeat(2, minmax(0, 1fr)); } }
+
+.upload-inspection-panel { margin-top: 14px; padding: 20px 24px; border-color: var(--brass); }
+.upload-mapping-grid { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 12px; margin: 14px 0; }
+.upload-mapping-grid label { display: grid; gap: 6px; color: var(--ink-faded); font: 9px var(--data); letter-spacing: .06em; }
+.upload-mapping-grid select, .upload-mapping-grid input { min-width: 0; border: 1px solid var(--line-strong); background: var(--paper-deep); color: var(--ink); padding: 10px; font: 11px var(--data); }
+.upload-preview { display: flex; flex-wrap: wrap; gap: 8px 20px; margin: 10px 0 14px; padding: 10px; border-top: 1px solid var(--line); border-bottom: 1px solid var(--line); color: var(--ink-faded); font: 9px var(--data); }
+.upload-validation-grid { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 8px 18px; margin-top: 16px; padding-top: 14px; border-top: 1px solid var(--line); }
+.upload-ready-row { display: flex; align-items: center; justify-content: space-between; gap: 12px; margin-top: 16px; padding-top: 12px; border-top: 1px solid var(--line); }
+@media (max-width: 760px) { .upload-mapping-grid, .upload-validation-grid { grid-template-columns: 1fr; } .upload-ready-row { align-items: flex-start; flex-direction: column; } }
