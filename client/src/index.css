@@ -260,3 +260,49 @@ button:disabled { cursor: not-allowed; opacity: .55; }
 .upload-validation-grid { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 8px 18px; margin-top: 16px; padding-top: 14px; border-top: 1px solid var(--line); }
 .upload-ready-row { display: flex; align-items: center; justify-content: space-between; gap: 12px; margin-top: 16px; padding-top: 12px; border-top: 1px solid var(--line); }
 @media (max-width: 760px) { .upload-mapping-grid, .upload-validation-grid { grid-template-columns: 1fr; } .upload-ready-row { align-items: flex-start; flex-direction: column; } }
+
+/* H5.2 release-candidate readability and accessibility refinements */
+:root { --ink-faded: rgba(43, 27, 17, 0.78); --line: rgba(43, 27, 17, 0.34); }
+input:focus-visible, select:focus-visible { outline: 2px solid var(--brass-dark); outline-offset: 2px; }
+.index-copy h1 { font-weight: 600; line-height: 1.02; }
+.panel-heading h2, .record-header h2, .inspection-heading h2, .placeholder-copy h2 { font-weight: 600; }
+.eyebrow, .section-kicker, .rail-label, .metadata-ribbon span, .reading-row span, .event-summary span, .comparison-record span, .comparison-state span, .calibration-grid span { color: var(--ink); font-weight: 600; }
+.lede, .panel-detail, .observation-card p, .reading-notice, .state-reading span, .chronicle-entry small, .placeholder-copy p, .record-source, .upload-preview, .chronicle-empty { color: var(--ink-faded); }
+.metadata-ribbon strong, .reading-row strong, .inspection-grid .reading-row strong, .event-summary strong, .comparison-metric-row strong { font-weight: 600; }
+.reading-row strong { letter-spacing: .02em; }
+.status-stamp-muted { color: var(--ink); }
+.axis-label, .real-plot .plot-legend { color: var(--ink); font-weight: 600; }
+.event-method span, .event-time, .event-detail small { color: var(--ink-faded); }
+.upload-mapping-grid select, .upload-mapping-grid input { background: var(--parchment); }
+.event-export-button:hover:not(:disabled) { color: var(--parchment); }
+@media (max-width: 760px) {
+  .main-deck { padding-inline: 16px; }
+  .metadata-ribbon { margin-inline: -16px; padding-inline: 16px; }
+  .master-index { gap: 22px; }
+  .index-copy h1 { font-size: clamp(29px, 9vw, 42px); }
+  .lede { font-size: 15px; line-height: 1.55; }
+  .waveform-panel, .readings-panel, .compact-panel, .archive-browser, .provenance-panel { padding-inline: 16px; }
+  .plot-viewport { margin-left: 25px; min-height: 210px; }
+  .axis-y { left: -24px; font-size: 8px; }
+  .panel-footer { font-size: 8px; }
+  .reading-row { padding-block: 13px; }
+  .reading-row strong { font-size: 18px; }
+  .event-method { line-height: 1.45; }
+  .event-row { font-size: 9px; }
+  .comparison-metric-head, .comparison-metric-row { overflow-wrap: anywhere; }
+}
+@media (max-width: 360px) {
+  .site-header { padding-inline: 14px; }
+  .brand-name { font-size: 16px; }
+  .main-deck { padding-inline: 12px; }
+  .metadata-ribbon { margin-inline: -12px; padding-inline: 12px; }
+  .metadata-ribbon strong { font-size: 8px; overflow-wrap: anywhere; }
+  .section-topline .status-stamp { white-space: normal; }
+  .record-header { gap: 10px; }
+  .record-header h2 { font-size: 17px; }
+  .observation-card h3 { font-size: 14px; }
+  .plot-viewport { margin-left: 21px; }
+  .axis-y { left: -20px; }
+  .axis-x { font-size: 8px; }
+  .upload-inspection-panel { padding-inline: 14px; }
+}
