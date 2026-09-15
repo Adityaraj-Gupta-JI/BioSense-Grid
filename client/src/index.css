@@ -242,3 +242,12 @@ button:disabled { cursor: not-allowed; opacity: .55; }
 .event-detail strong { font: 12px var(--data); font-weight: 400; }
 .event-detail small { color: var(--ink-faded); font: 9px var(--data); }
 @media (max-width: 760px) { .event-row { grid-template-columns: .7fr 1fr; } .event-time, .event-row strong { text-align: left; } }
+
+.event-summary { display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); gap: 7px; margin-bottom: 10px; padding-bottom: 10px; border-bottom: 1px solid var(--line); }
+.event-summary div { display: grid; gap: 4px; }
+.event-summary span { color: var(--ink-faded); font: 8px var(--data); letter-spacing: .05em; }
+.event-summary strong { color: var(--brass-dark); font: 15px var(--data); font-weight: 400; }
+.event-export-button { margin-top: 12px; width: 100%; padding: 8px 10px; border: 1px solid var(--brass); background: transparent; color: var(--brass-dark); font: 9px var(--data); letter-spacing: .08em; }
+.event-export-button:hover:not(:disabled) { background: var(--brass); color: var(--paper); }
+.event-export-button:disabled { opacity: .45; cursor: not-allowed; }
+@media (max-width: 760px) { .event-summary { grid-template-columns: repeat(2, minmax(0, 1fr)); } }

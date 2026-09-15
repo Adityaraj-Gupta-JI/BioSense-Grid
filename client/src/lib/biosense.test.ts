@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { analyzeSignal, BioSignal, compareCompatible, detectSignalEvents, inspectSignal, parseCsvObservation } from './biosense';
+import { analyzeSignal, BioSignal, compareCompatible, detectSignalEvents, eventRegisterCsv, inspectSignal, parseCsvObservation } from './biosense';
 
 function fixture(values: number[]): BioSignal {
   return {
@@ -81,5 +81,35 @@ describe('BioSense deterministic analysis', () => {
     const values = Array.from({ length: 100 }, (_, index) => (index % 2 ? 0.01 : -0.01));
     const result = detectSignalEvents(fixture(values));
     expect(result.events.length).toBeLessThanOrEqual(1);
+  });
+
+  it('groups a sustained excursion with a brief threshold gap as one event', () => {
+    const values = new Array(100).fill(0);
+    for (let index = 30; index < 34; index += 1) values[index] = 5;
+    for (let index = 36; index < 40; index += 1) values[index] = 5;
+    const result = detectSignalEvents(fixture(values));
+    expect(result.events).toHaveLength(1);
+    expect(result.groupingRule).toBe('MERGE_GAPS_WITHIN_MINIMUM_SEPARATION');
+    expect(result.events[0].duration_s).toBeGreaterThan(0);
+  });
+
+  it('exports one stable CSV row per detected event', () => {
+    const values = new Array(100).fill(0); values[20] = 5; values[21] = 5; values[22] = 5; values[70] = -5; values[71] = -5; values[72] = -5;
+    const signal = fixture(values);
+    const result = detectSignalEvents(signal);
+    const csv = eventRegisterCsv(signal, result);
+    expect(csv.split('\n')).toHaveLength(result.events.length + 1);
+    expect(csv.split('\n')[0]).toContain('event_id,signal_id,event_type,polarity');
+    expect(csv).toContain('TEST-FIXTURE');
+  });
+
+  it('runs reproducibly on the preserved real source-derived observation', async () => {
+    const source = await import('../../public/data/biosense-demo-rf-1um.json');
+    const realSignal = source.default as BioSignal;
+    const first = detectSignalEvents(realSignal);
+    const second = detectSignalEvents(realSignal);
+    expect(first.events).toEqual(second.events);
+    expect(first.events.every((event) => event.source_signal === realSignal.signal_id && event.end_time_h >= event.start_time_h)).toBe(true);
+    expect(eventRegisterCsv(realSignal, first).split('\n')).toHaveLength(first.events.length + 1);
   });
 });

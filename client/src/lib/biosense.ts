@@ -103,6 +103,9 @@ export type EventDetection = {
   baseline: 'rolling-median';
   baselineWindow: number;
   variability: 'MAD';
+  thresholdFactor: number;
+  thresholdMethod: 'MAD' | 'MAD_WITH_ROBUST_FALLBACK';
+  groupingRule: 'MERGE_GAPS_WITHIN_MINIMUM_SEPARATION';
   threshold: number;
   minimumSeparationSamples: number;
   minimumDurationSamples: number;
@@ -252,7 +255,8 @@ export function analyzeSignal(signal: BioSignal): Analysis {
 
 export function detectSignalEvents(signal: BioSignal): EventDetection {
   const points = signal.data.filter((point) => finite(point.time_h) && finite(point.value));
-  if (points.length < 8) return { events: [], method: 'deterministic-threshold', baseline: 'rolling-median', baselineWindow: 0, variability: 'MAD', threshold: Number.NaN, minimumSeparationSamples: 0, minimumDurationSamples: 0, status: 'UNAVAILABLE', reason: 'At least eight finite samples are required.' };
+  const thresholdFactor = 3;
+  if (points.length < 8) return { events: [], method: 'deterministic-threshold', baseline: 'rolling-median', baselineWindow: 0, variability: 'MAD', thresholdFactor, thresholdMethod: 'MAD', groupingRule: 'MERGE_GAPS_WITHIN_MINIMUM_SEPARATION', threshold: Number.NaN, minimumSeparationSamples: 0, minimumDurationSamples: 0, status: 'UNAVAILABLE', reason: 'At least eight finite samples are required.' };
   const window = Math.min(31, points.length % 2 === 0 ? points.length - 1 : points.length);
   const half = Math.floor(window / 2);
   const medianOf = (values: number[]) => { const sorted = [...values].sort((a, b) => a - b); return sorted[Math.floor(sorted.length / 2)]; };
@@ -260,10 +264,11 @@ export function detectSignalEvents(signal: BioSignal): EventDetection {
   const residuals = points.map((point, index) => point.value - baseline[index]);
   const residualMedian = medianOf(residuals);
   const mad = medianOf(residuals.map((value) => Math.abs(value - residualMedian)));
-  if (residuals.every((value) => value === 0)) return { events: [], method: 'deterministic-threshold', baseline: 'rolling-median', baselineWindow: window, variability: 'MAD', threshold: 0, minimumSeparationSamples: Math.max(3, Math.floor(points.length * 0.005)), minimumDurationSamples: Math.max(2, Math.floor(points.length * 0.002)), status: 'NO_EVENTS' };
+  if (residuals.every((value) => value === 0)) return { events: [], method: 'deterministic-threshold', baseline: 'rolling-median', baselineWindow: window, variability: 'MAD', thresholdFactor, thresholdMethod: 'MAD', groupingRule: 'MERGE_GAPS_WITHIN_MINIMUM_SEPARATION', threshold: 0, minimumSeparationSamples: Math.max(3, Math.floor(points.length * 0.005)), minimumDurationSamples: Math.max(2, Math.floor(points.length * 0.002)), status: 'NO_EVENTS' };
   const differences = residuals.slice(1).map((value, index) => Math.abs(value - residuals[index]));
   const fallbackScale = differences.length ? medianOf(differences) : 0;
-  const threshold = Math.max(3 * 1.4826 * mad, 3 * fallbackScale, 0.3 * Math.sqrt(average(residuals.map((value) => value ** 2))), 1e-12);
+  const thresholdMethod = mad > 0 ? 'MAD' : 'MAD_WITH_ROBUST_FALLBACK';
+  const threshold = Math.max(thresholdFactor * 1.4826 * mad, thresholdFactor * fallbackScale, 0.1 * thresholdFactor * Math.sqrt(average(residuals.map((value) => value ** 2))), 1e-12);
   const minimumDurationSamples = Math.max(2, Math.floor(points.length * 0.002));
   const minimumSeparationSamples = Math.max(3, Math.floor(points.length * 0.005));
   const candidates: { start: number; end: number }[] = [];
@@ -284,13 +289,20 @@ export function detectSignalEvents(signal: BioSignal): EventDetection {
     const delta = residuals[peakIndex];
     return { event_id: `EVT-${String(index + 1).padStart(3, '0')}`, type: delta >= 0 ? 'POSITIVE_PEAK' : 'NEGATIVE_PEAK', start_time_h: points[eventStart].time_h, peak_time_h: points[peakIndex].time_h, end_time_h: points[eventEnd].time_h, duration_s: (points[eventEnd].time_h - points[eventStart].time_h) * 3600, peak_value: points[peakIndex].value, baseline_value: baseline[peakIndex], amplitude_delta: delta, confidence: 'DETERMINISTIC', source_signal: signal.signal_id } as SignalEvent;
   });
-  return { events, method: 'deterministic-threshold', baseline: 'rolling-median', baselineWindow: window, variability: 'MAD', threshold, minimumSeparationSamples, minimumDurationSamples, status: events.length ? 'READY' : 'NO_EVENTS' };
+  return { events, method: 'deterministic-threshold', baseline: 'rolling-median', baselineWindow: window, variability: 'MAD', thresholdFactor, thresholdMethod, groupingRule: 'MERGE_GAPS_WITHIN_MINIMUM_SEPARATION', threshold, minimumSeparationSamples, minimumDurationSamples, status: events.length ? 'READY' : 'NO_EVENTS' };
 }
 
 export function downsample(data: DataPoint[], count = 260) {
   if (data.length <= count) return data;
   const stride = (data.length - 1) / (count - 1);
   return Array.from({ length: count }, (_, index) => data[Math.round(index * stride)]);
+}
+
+export function eventRegisterCsv(signal: BioSignal, detection: EventDetection): string {
+  const headers = ['event_id', 'signal_id', 'event_type', 'polarity', 'start_time', 'peak_time', 'end_time', 'duration_s', 'peak_value', 'baseline_value', 'amplitude_delta', 'detector_method', 'baseline_method', 'threshold_method', 'processing_version'];
+  const escape = (value: string | number) => { const text = String(value); return /[",\n]/.test(text) ? `"${text.replace(/"/g, '""')}"` : text; };
+  const rows = detection.events.map((event) => [event.event_id, signal.signal_id, event.type, event.type === 'POSITIVE_PEAK' ? 'positive' : 'negative', event.start_time_h, event.peak_time_h, event.end_time_h, event.duration_s, event.peak_value, event.baseline_value, event.amplitude_delta, detection.method, detection.baseline, detection.thresholdMethod, signal.provenance.processing_version].map(escape).join(','));
+  return [headers.join(','), ...rows].join('\n');
 }
 
 export function formatNumber(value: number, digits = 3) {
