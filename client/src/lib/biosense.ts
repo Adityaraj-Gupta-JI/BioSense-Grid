@@ -58,7 +58,56 @@ export type Analysis = {
   spectralCentroidHz: number;
   spectralBandwidthHz: number;
   spectralEntropy: number;
+  method: {
+    name: string;
+    window: string;
+    segment: number;
+    overlap: number;
+  };
   psd: { frequencyHz: number; power: number }[];
+};
+
+export type InputInspection = {
+  timeDetected: boolean;
+  signalDetected: boolean;
+  sampleCount: number;
+  durationHours: number;
+  intervalHours: number;
+  rateHz: number;
+  missingValues: number;
+  nonFiniteValues: number;
+  duplicateTimes: number;
+  irregularSampling: boolean;
+  flatline: boolean;
+  baselineStability: number;
+  status: 'READY' | 'FAULT';
+};
+
+export type SignalEvent = {
+  event_id: string;
+  type: 'TRANSIENT_EXCURSION' | 'POSITIVE_PEAK' | 'NEGATIVE_PEAK';
+  start_time_h: number;
+  peak_time_h: number;
+  end_time_h: number;
+  duration_s: number;
+  peak_value: number;
+  baseline_value: number;
+  amplitude_delta: number;
+  confidence: 'DETERMINISTIC';
+  source_signal: string;
+};
+
+export type EventDetection = {
+  events: SignalEvent[];
+  method: 'deterministic-threshold';
+  baseline: 'rolling-median';
+  baselineWindow: number;
+  variability: 'MAD';
+  threshold: number;
+  minimumSeparationSamples: number;
+  minimumDurationSamples: number;
+  status: 'READY' | 'NO_EVENTS' | 'UNAVAILABLE';
+  reason?: string;
 };
 
 const finite = (value: number) => Number.isFinite(value);
@@ -130,7 +179,37 @@ function welch(values: number[], rateHz: number) {
   const centroid = psd.reduce((sum, point) => sum + point.frequencyHz * point.power, 0) / totalPower;
   const bandwidth = Math.sqrt(psd.reduce((sum, point) => sum + ((point.frequencyHz - centroid) ** 2) * point.power, 0) / totalPower);
   const entropy = -psd.reduce((sum, point) => { const probability = point.power / totalPower; return probability > 0 ? sum + probability * Math.log2(probability) : sum; }, 0) / Math.log2(Math.max(2, psd.length));
-  return { psd, dominantFrequencyHz: dominant?.frequencyHz ?? 0, spectralCentroidHz: centroid, spectralBandwidthHz: bandwidth, spectralEntropy: entropy };
+  return { psd, dominantFrequencyHz: dominant?.frequencyHz ?? 0, spectralCentroidHz: centroid, spectralBandwidthHz: bandwidth, spectralEntropy: entropy, method: { name: 'WELCH', window: 'HANN', segment: actualSegment, overlap } };
+}
+
+export function inspectSignal(signal: BioSignal): InputInspection {
+  const times = signal.data.map((point) => point.time_h);
+  const values = signal.data.map((point) => point.value);
+  const validTimes = times.filter(finite);
+  const validValues = values.filter(finite);
+  const deltas = validTimes.slice(1).map((time, index) => time - validTimes[index]).filter(finite);
+  const intervalHours = deltas.length ? average(deltas) : Number.NaN;
+  const irregularSampling = !deltas.length || deltas.some((delta) => Math.abs(delta - intervalHours) > Math.max(1e-8, intervalHours * 0.01));
+  const mean = validValues.length ? average(validValues) : Number.NaN;
+  const baseline = validValues.slice(0, Math.min(30, validValues.length));
+  const baselineStability = baseline.length ? Math.sqrt(average(baseline.map((value) => (value - average(baseline)) ** 2))) : Number.NaN;
+  const nonFiniteValues = values.length - validValues.length;
+  const duplicateTimes = validTimes.length - new Set(validTimes).size;
+  return {
+    timeDetected: validTimes.length === times.length && validTimes.length > 1,
+    signalDetected: validValues.length === values.length && validValues.length > 1,
+    sampleCount: signal.data.length,
+    durationHours: validTimes.length > 1 ? validTimes[validTimes.length - 1] - validTimes[0] : Number.NaN,
+    intervalHours,
+    rateHz: Number.isFinite(intervalHours) && intervalHours > 0 ? 1 / (intervalHours * 3600) : Number.NaN,
+    missingValues: values.length - validValues.length,
+    nonFiniteValues,
+    duplicateTimes,
+    irregularSampling,
+    flatline: validValues.length > 0 && validValues.every((value) => value === validValues[0]),
+    baselineStability,
+    status: validTimes.length > 1 && validValues.length > 1 && nonFiniteValues === 0 && duplicateTimes === 0 && !irregularSampling ? 'READY' : 'FAULT',
+  };
 }
 
 export function analyzeSignal(signal: BioSignal): Analysis {
@@ -171,6 +250,43 @@ export function analyzeSignal(signal: BioSignal): Analysis {
   };
 }
 
+export function detectSignalEvents(signal: BioSignal): EventDetection {
+  const points = signal.data.filter((point) => finite(point.time_h) && finite(point.value));
+  if (points.length < 8) return { events: [], method: 'deterministic-threshold', baseline: 'rolling-median', baselineWindow: 0, variability: 'MAD', threshold: Number.NaN, minimumSeparationSamples: 0, minimumDurationSamples: 0, status: 'UNAVAILABLE', reason: 'At least eight finite samples are required.' };
+  const window = Math.min(31, points.length % 2 === 0 ? points.length - 1 : points.length);
+  const half = Math.floor(window / 2);
+  const medianOf = (values: number[]) => { const sorted = [...values].sort((a, b) => a - b); return sorted[Math.floor(sorted.length / 2)]; };
+  const baseline = points.map((_, index) => medianOf(points.slice(Math.max(0, index - half), Math.min(points.length, index + half + 1)).map((point) => point.value)));
+  const residuals = points.map((point, index) => point.value - baseline[index]);
+  const residualMedian = medianOf(residuals);
+  const mad = medianOf(residuals.map((value) => Math.abs(value - residualMedian)));
+  if (residuals.every((value) => value === 0)) return { events: [], method: 'deterministic-threshold', baseline: 'rolling-median', baselineWindow: window, variability: 'MAD', threshold: 0, minimumSeparationSamples: Math.max(3, Math.floor(points.length * 0.005)), minimumDurationSamples: Math.max(2, Math.floor(points.length * 0.002)), status: 'NO_EVENTS' };
+  const differences = residuals.slice(1).map((value, index) => Math.abs(value - residuals[index]));
+  const fallbackScale = differences.length ? medianOf(differences) : 0;
+  const threshold = Math.max(3 * 1.4826 * mad, 3 * fallbackScale, 0.3 * Math.sqrt(average(residuals.map((value) => value ** 2))), 1e-12);
+  const minimumDurationSamples = Math.max(2, Math.floor(points.length * 0.002));
+  const minimumSeparationSamples = Math.max(3, Math.floor(points.length * 0.005));
+  const candidates: { start: number; end: number }[] = [];
+  let start = -1;
+  residuals.forEach((residual, index) => {
+    if (Math.abs(residual) >= threshold && start < 0) start = index;
+    if (start >= 0 && (Math.abs(residual) < threshold || index === residuals.length - 1)) {
+      const end = Math.abs(residual) >= threshold && index === residuals.length - 1 ? index : index - 1;
+      if (end - start + 1 >= minimumDurationSamples) candidates.push({ start, end });
+      start = -1;
+    }
+  });
+  const merged: { start: number; end: number }[] = [];
+  candidates.forEach((candidate) => { const previous = merged[merged.length - 1]; if (previous && candidate.start - previous.end <= minimumSeparationSamples) previous.end = candidate.end; else merged.push({ ...candidate }); });
+  const events = merged.map(({ start: eventStart, end: eventEnd }, index) => {
+    let peakIndex = eventStart;
+    for (let cursor = eventStart + 1; cursor <= eventEnd; cursor += 1) if (Math.abs(residuals[cursor]) > Math.abs(residuals[peakIndex])) peakIndex = cursor;
+    const delta = residuals[peakIndex];
+    return { event_id: `EVT-${String(index + 1).padStart(3, '0')}`, type: delta >= 0 ? 'POSITIVE_PEAK' : 'NEGATIVE_PEAK', start_time_h: points[eventStart].time_h, peak_time_h: points[peakIndex].time_h, end_time_h: points[eventEnd].time_h, duration_s: (points[eventEnd].time_h - points[eventStart].time_h) * 3600, peak_value: points[peakIndex].value, baseline_value: baseline[peakIndex], amplitude_delta: delta, confidence: 'DETERMINISTIC', source_signal: signal.signal_id } as SignalEvent;
+  });
+  return { events, method: 'deterministic-threshold', baseline: 'rolling-median', baselineWindow: window, variability: 'MAD', threshold, minimumSeparationSamples, minimumDurationSamples, status: events.length ? 'READY' : 'NO_EVENTS' };
+}
+
 export function downsample(data: DataPoint[], count = 260) {
   if (data.length <= count) return data;
   const stride = (data.length - 1) / (count - 1);
@@ -186,4 +302,42 @@ export function formatFrequency(value: number) {
   if (!Number.isFinite(value) || value === 0) return '0 Hz';
   if (value < 0.001) return `${(value * 1000).toFixed(3)} mHz`;
   return `${value.toFixed(4)} Hz`;
+}
+
+export type CsvInspection = InputInspection & { columns: string[]; selectedTime: string; selectedSignal: string; unit: string };
+
+export function parseCsvObservation(text: string, filename: string, timeColumn?: string, signalColumn?: string, unit = 'UNAVAILABLE'): { signal?: BioSignal; inspection?: CsvInspection; error?: string } {
+  if (!text.trim()) return { error: '[ INPUT SCHEMA FAULT ] CSV file is empty.' };
+  if (text.length > 2_000_000) return { error: '[ INPUT SCHEMA FAULT ] CSV exceeds the 2 MB MVP limit.' };
+  const lines = text.trim().split(/\r?\n/).filter(Boolean);
+  const columns = lines[0].split(',').map((column) => column.trim());
+  if (columns.length < 2) return { error: '[ INPUT SCHEMA FAULT ] CSV requires at least two columns.' };
+  const rows = lines.slice(1).map((line) => line.split(',').map((cell) => cell.trim()));
+  const probableTime = timeColumn ?? columns.find((column) => /time|date|timestamp|hour/i.test(column)) ?? columns[0];
+  const probableSignal = signalColumn ?? columns.find((column) => column !== probableTime && /signal|value|current|measurement|data/i.test(column)) ?? columns.find((column) => column !== probableTime) ?? '';
+  if (!probableTime || !probableSignal) return { error: '[ INPUT SCHEMA FAULT ] Time and signal columns are required.' };
+  const timeIndex = columns.indexOf(probableTime);
+  const signalIndex = columns.indexOf(probableSignal);
+  if (timeIndex < 0 || signalIndex < 0 || timeIndex === signalIndex) return { error: '[ INPUT SCHEMA FAULT ] Selected columns are not available.' };
+  const data = rows.map((row) => ({ time_h: Number(row[timeIndex]), value: Number(row[signalIndex]) }));
+  const signal: BioSignal = {
+    signal_id: `CSV-${filename.replace(/[^a-z0-9]+/gi, '-').replace(/^-|-$/g, '').toUpperCase()}`,
+    organism: { name: 'UNAVAILABLE' }, modality: { domain: 'user-upload', measurement: 'user-provided signal', unit },
+    experiment: { poised_potential_mv: Number.NaN, mediator: 'UNAVAILABLE', mediator_concentration_um: Number.NaN, condition_source: 'USER CSV' },
+    sampling: { time_column: probableTime, time_unit: 'UNAVAILABLE', interval_hours: Number.NaN, rate_hz: Number.NaN, duration_hours: Number.NaN },
+    source: { type: 'user_upload', publisher: 'BioSense Grid', doi: 'UNAVAILABLE', title: filename, license: 'UNAVAILABLE', archive_file: filename, workbook: 'UNAVAILABLE', sheet: 'UNAVAILABLE', retrieved_utc: new Date().toISOString() },
+    provenance: { raw_archive_sha256: 'UNAVAILABLE', extraction: `CSV import; time=${probableTime}; signal=${probableSignal}`, processing_version: 'biosense-grid-foundation-data-v1' }, data,
+  };
+  const inspection = inspectSignal(signal);
+  if (data.length < 4) return { error: '[ INPUT SCHEMA FAULT ] CSV requires at least four data rows.', inspection: { ...inspection, columns, selectedTime: probableTime, selectedSignal: probableSignal, unit } };
+  return { signal, inspection: { ...inspection, columns, selectedTime: probableTime, selectedSignal: probableSignal, unit } };
+}
+
+export function compareCompatible(a: BioSignal, b: BioSignal) {
+  const reasons: string[] = [];
+  if (a.modality.domain !== b.modality.domain) reasons.push('modality differs');
+  if (a.modality.unit !== b.modality.unit) reasons.push('unit differs');
+  if (a.sampling.time_unit !== b.sampling.time_unit) reasons.push('time representation differs');
+  if (a.data.length < 4 || b.data.length < 4) reasons.push('insufficient rows');
+  return { compatible: reasons.length === 0, reasons };
 }
